@@ -28,6 +28,7 @@ using boost::redis::response;
 using boost::redis::ignore;
 using boost::redis::ignore_t;
 using boost::redis::async_run;
+using boost::redis::address;
 using namespace std::chrono_literals;
 
 BOOST_AUTO_TEST_CASE(receives_push_waiting_resps)
@@ -66,7 +67,7 @@ BOOST_AUTO_TEST_CASE(receives_push_waiting_resps)
 
    conn.async_exec(req1, ignore, c1);
 
-   async_run(conn, "127.0.0.1", "6379", 10s, 10s, [&](auto ec){
+   async_run(conn, address{}, 10s, 10s, [&](auto ec){
       BOOST_TEST(!ec);
       conn.cancel(operation::receive);
    });
@@ -98,7 +99,7 @@ BOOST_AUTO_TEST_CASE(push_received1)
       BOOST_TEST(!ec);
    });
 
-   async_run(conn, "127.0.0.1", "6379", 10s, 10s, [&](auto ec){
+   async_run(conn, address{}, 10s, 10s, [&](auto ec){
       std::cout << "async_run: " << ec.message() << std::endl;
       conn.cancel(operation::receive);
    });
@@ -136,7 +137,7 @@ BOOST_AUTO_TEST_CASE(push_filtered_out)
       BOOST_TEST(!ec);
    });
 
-   async_run(conn, "127.0.0.1", "6379", 10s, 10s, [&](auto ec){
+   async_run(conn, address{}, 10s, 10s, [&](auto ec){
       BOOST_TEST(!ec);
    });
 
@@ -202,7 +203,7 @@ BOOST_AUTO_TEST_CASE(test_push_adapter)
       BOOST_CHECK_EQUAL(ec, net::experimental::error::channel_errors::channel_cancelled);
    });
 
-   async_run(conn, "127.0.0.1", "6379", 10s, 10s, [](auto ec){
+   async_run(conn, address{}, 10s, 10s, [](auto ec){
       BOOST_CHECK_EQUAL(ec, boost::system::errc::errc_t::operation_canceled);
    });
 
@@ -303,7 +304,7 @@ BOOST_AUTO_TEST_CASE(many_subscribers)
 
    conn.async_exec(req0, ignore,  c0);
 
-   async_run(conn, "127.0.0.1", "6379", 10s, 10s, [&](auto ec){
+   async_run(conn, address{}, 10s, 10s, [&](auto ec){
       BOOST_TEST(!ec);
       conn.cancel(operation::receive);
    });
