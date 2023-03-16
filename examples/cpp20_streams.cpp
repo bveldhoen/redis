@@ -15,7 +15,6 @@
 #include <vector>
 
 namespace net = boost::asio;
-using tcp = boost::asio::ip::tcp;
 
 namespace redis = boost::redis;
 using redis::operation;
@@ -29,33 +28,36 @@ void log(boost::system::error_code const& ec, char const* prefix)
 
 class redis_client
 {
-    net::io_context& ioc_;
-    tcp::endpoint endpoint_;
-    net::ip::tcp::resolver resv_;
     redis::connection conn_;
+    redis::address addr_;
     std::string redisStreamKey_;
-
     std::string streamId_;
+    redis::request req_;
+    redis::generic_response resp_;
 
 public:
     redis_client(
         net::io_context& ioc,
-        tcp::endpoint endpoint,
+        const redis::address& addr,
         const std::string& redisStreamKey)
-        : ioc_(ioc)
-        , endpoint_(endpoint)
-        , resv_(ioc)
-        , conn_(net::make_strand(ioc))
+        : conn_(net::make_strand(ioc))
+        , addr_(addr)
         , redisStreamKey_(redisStreamKey)
         , streamId_("$")
+        , req_()
+        , resp_()
     {
     }
 
-    void resolve()
+    void start()
     {
-        resv_.async_resolve(
-            endpoint_,
-            [this](auto ec, auto results) { this->on_resolve(ec, results); });
+       std::chrono::seconds timeout{10};
+
+       redis::async_run(conn_, addr_, timeout, timeout, [this](auto ec) {
+          log(ec, "async_run: ");
+       });
+
+       do_exec();
     }
 
 private:
@@ -82,40 +84,24 @@ private:
         do_exec();
     }
 
-    void on_resolve(
-        const boost::system::error_code& ec,
-        tcp::resolver::results_type results)
-    {
-        if (ec) {
-            return log(ec, "on_resolve: ");
-        }
-
-        net::async_connect(
-            conn_.next_layer(),
-            results,
-            [this](auto ec, auto ep) { this->on_connect(ec, ep); });
-    }
-
     void
     do_exec()
     {
-        auto req = this->createStreamRequest();
-        auto resp = this->createStreamResponse();
+        req_.clear();
+        req_.push("XREAD", "BLOCK", "0", "STREAMS", this->redisStreamKey_, this->streamId_);
 
         conn_.async_exec(
-            *req,
-            *resp,
-            [this, req, resp](auto ec, auto size) { this->on_exec(ec, size, req, resp); });
+            req_,
+            resp_,
+            [this](auto ec, auto size) { this->on_exec(ec, size); });
     }
 
     void on_exec(
         boost::system::error_code ec,
-        std::size_t responseSize,
-        std::shared_ptr<request> req,
-        std::shared_ptr<generic_response> resp)
+        std::size_t responseSize)
     {
         try {
-            this->on_exec_internal(ec, responseSize, req, resp);
+            this->on_exec_internal(ec, responseSize);
         }
         catch (...) {
         }
@@ -126,9 +112,7 @@ private:
     void
     on_exec_internal(
         boost::system::error_code ec,
-        std::size_t responseSize,
-        std::shared_ptr<request> req,
-        std::shared_ptr<generic_response> resp)
+        std::size_t responseSize)
     {
         static const std::string Response_Field_MyField = "myfield";
 
@@ -139,7 +123,7 @@ private:
             return;
         }
 
-        if (!resp->has_value())
+        if (!resp_.has_value())
         {
             return;
         }
@@ -157,38 +141,26 @@ private:
 
         // "myfield" values don't start before index 4.
         std::size_t itemIndex = 4;
-        while (itemIndex < resp->value().size()) {
-            const auto& val = resp->value().at(itemIndex).value;
+        while (itemIndex < resp_.value().size()) {
+            const auto& val = resp_.value().at(itemIndex).value;
 
             if (Response_Field_MyField.compare(val) == 0) {
                 // We've hit a myfield field.
                 //  The streamId is located at itemIndex - 2
                 //  The payload is located at itemIndex + 1
-                this->streamId_ = resp->value().at(itemIndex - 2).value;
-                std::cout << "[" << std::this_thread::get_id() << "] StreamId: " << this->streamId_ << ", MyField: " << resp->value().at(itemIndex + 1).value << std::endl;
+                this->streamId_ = resp_.value().at(itemIndex - 2).value;
+                std::cout << "[" << std::this_thread::get_id() << "] StreamId: " << this->streamId_ << ", MyField: " << resp_.value().at(itemIndex + 1).value << std::endl;
                 ++itemIndex; // We can increase so we don't read this again
             }
 
             ++itemIndex;
         }
     }
-
-    std::shared_ptr<request> createStreamRequest()
-    {
-        auto req = std::make_shared<request>();
-        req->push("XREAD", "BLOCK", "0", "STREAMS", this->redisStreamKey_, this->streamId_);
-        return req;
-    }
-
-    std::shared_ptr<generic_response> createStreamResponse()
-    {
-        return std::make_shared<generic_response>();
-    }
 };
 
 std::shared_ptr<redis_client> startRedisClient(
     const std::string& ipAddress,
-    unsigned short portNumber,
+    const std::string& portNumber,
     const std::string& redisStreamKey,
     boost::asio::io_context& ioc)
 {
@@ -196,9 +168,9 @@ std::shared_ptr<redis_client> startRedisClient(
 
     auto redisClient = std::make_shared<redis_client>(
         ioc,
-        tcp::endpoint{address, portNumber},
+        redis::address{ipAddress, portNumber},
         redisStreamKey);
-    redisClient->resolve();
+    redisClient->start();
     return redisClient;
 }
 
@@ -208,14 +180,14 @@ auto main(int argc, char * argv[]) -> int
 {
     try {
         std::string redisHost = "127.0.0.1";
-        unsigned short redisPort = 6379;
+        std::string redisPort = "6379";
         int threads = 20;
         std::string redisStreamKey = "test-topic";
 
         if (argc == 5)
         {
             redisHost = argv[1];
-            redisPort = static_cast<unsigned short>(std::atoi(argv[2]));
+            redisPort = argv[2];
             threads = std::max<int>(1, std::atoi(argv[3]));
             redisStreamKey = argv[4];
         }
