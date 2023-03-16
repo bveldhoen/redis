@@ -15,6 +15,7 @@
 #include <vector>
 
 namespace net = boost::asio;
+using tcp = boost::asio::ip::tcp;
 
 namespace redis = boost::redis;
 using redis::operation;
@@ -28,8 +29,10 @@ void log(boost::system::error_code const& ec, char const* prefix)
 
 class redis_client
 {
+    net::io_context& ioc_;
+    tcp::endpoint endpoint_;
     redis::connection conn_;
-    redis::address addr_;
+    net::ip::tcp::resolver resv_;
     std::string redisStreamKey_;
     std::string streamId_;
     redis::request req_;
@@ -38,10 +41,12 @@ class redis_client
 public:
     redis_client(
         net::io_context& ioc,
-        const redis::address& addr,
+        tcp::endpoint endpoint,
         const std::string& redisStreamKey)
-        : conn_(net::make_strand(ioc))
-        , addr_(addr)
+        : ioc_(ioc)
+        , endpoint_(endpoint)
+        , conn_(net::make_strand(ioc))
+        , resv_(conn_.get_executor())
         , redisStreamKey_(redisStreamKey)
         , streamId_("$")
         , req_()
@@ -49,15 +54,11 @@ public:
     {
     }
 
-    void start()
+    void resolve()
     {
-       std::chrono::seconds timeout{10};
-
-       redis::async_run(conn_, addr_, timeout, timeout, [this](auto ec) {
-          log(ec, "async_run: ");
-       });
-
-       do_exec();
+        resv_.async_resolve(
+            endpoint_,
+            [this](auto ec, auto results) { this->on_resolve(ec, results); });
     }
 
 private:
@@ -82,6 +83,20 @@ private:
 
         conn_.async_run([this](auto ec) { this->on_run(ec); });
         do_exec();
+    }
+
+    void on_resolve(
+        const boost::system::error_code& ec,
+        tcp::resolver::results_type results)
+    {
+        if (ec) {
+            return log(ec, "on_resolve: ");
+        }
+
+        net::async_connect(
+            conn_.next_layer(),
+            results,
+            [this](auto ec, auto ep) { this->on_connect(ec, ep); });
     }
 
     void
@@ -160,7 +175,7 @@ private:
 
 std::shared_ptr<redis_client> startRedisClient(
     const std::string& ipAddress,
-    const std::string& portNumber,
+    unsigned short portNumber,
     const std::string& redisStreamKey,
     boost::asio::io_context& ioc)
 {
@@ -168,9 +183,9 @@ std::shared_ptr<redis_client> startRedisClient(
 
     auto redisClient = std::make_shared<redis_client>(
         ioc,
-        redis::address{ipAddress, portNumber},
+        tcp::endpoint{address, portNumber},
         redisStreamKey);
-    redisClient->start();
+    redisClient->resolve();
     return redisClient;
 }
 
@@ -180,14 +195,14 @@ auto main(int argc, char * argv[]) -> int
 {
     try {
         std::string redisHost = "127.0.0.1";
-        std::string redisPort = "6379";
+        unsigned short redisPort = 6379;
         int threads = 20;
         std::string redisStreamKey = "test-topic";
 
         if (argc == 5)
         {
             redisHost = argv[1];
-            redisPort = argv[2];
+            redisPort = static_cast<unsigned short>(std::atoi(argv[2]));
             threads = std::max<int>(1, std::atoi(argv[3]));
             redisStreamKey = argv[4];
         }
